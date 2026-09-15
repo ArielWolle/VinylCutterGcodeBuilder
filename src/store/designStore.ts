@@ -52,7 +52,7 @@ function centerTransformFor(item: Pick<SvgItem, "naturalWidthMm" | "naturalHeigh
 export const useDesignStore = create<DesignState>()(
   persist(
     (set, get) => ({
-  frame: { widthMm: 300, heightMm: 300 },
+  frame: { widthMm: 640, heightMm: 300 },
   items: [],
   selectedId: null,
   tool: "select",
