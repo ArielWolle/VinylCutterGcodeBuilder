@@ -9,12 +9,20 @@ import {
   type PathEntry,
 } from "./dragKnife";
 
+export interface GcodeSegment {
+  type: "travel" | "cut";
+  /** Machine-space (mm) points, same coordinate space as the emitted G-code X/Y values. */
+  points: [number, number][];
+}
+
 export interface GcodeResult {
   lines: string[];
   text: string;
   pathCount: number;
   pointCount: number;
   estimatedLengthMm: number;
+  /** Flattened travel (G0) and cut (G1) moves in machine space, for toolpath visualization. */
+  segments: GcodeSegment[];
 }
 
 function num(n: number, decimals: number): string {
@@ -103,6 +111,8 @@ export function generateGcode(
   let lastFeedTravel = -1;
   let lastFeedCut = -1;
   const passes = Math.max(1, Math.round(settings.passes));
+  const segments: GcodeSegment[] = [];
+  let lastPos: [number, number] | null = null;
 
   for (let passIndex = 0; passIndex < passes; passIndex++) {
     if (passes > 1) lines.push(`; Pass ${passIndex + 1} of ${passes}`);
@@ -121,8 +131,11 @@ export function generateGcode(
       lines.push(travelLine);
       lastFeedTravel = settings.feedRateTravelMmMin;
 
+      if (lastPos) segments.push({ type: "travel", points: [lastPos, [sx, sy]] });
+
       lines.push(...headDown(zWork));
 
+      const cutPts: [number, number][] = [[sx, sy]];
       let prev = pts[0];
       for (let i = 1; i < pts.length; i++) {
         const [x, y] = pts[i];
@@ -135,7 +148,10 @@ export function generateGcode(
         estimatedLengthMm += Math.hypot(x - prev[0], y - prev[1]);
         prev = [x, y];
         pointCount++;
+        cutPts.push([x, y]);
       }
+      segments.push({ type: "cut", points: cutPts });
+      lastPos = prev;
 
       lines.push(...headUp());
     }
@@ -154,6 +170,7 @@ export function generateGcode(
     pathCount,
     pointCount,
     estimatedLengthMm,
+    segments,
   };
 }
 

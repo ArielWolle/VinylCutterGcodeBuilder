@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useDesignStore } from "../store/designStore";
 import { useMachineStore } from "../store/machineStore";
 import { useSerialStore } from "../store/serialStore";
+import { useGcodeStore } from "../store/gcodeStore";
+import { useUiStore } from "../store/uiStore";
 import { estimateJobTimeSeconds, generateGcode } from "../lib/gcode";
 
 export function GCodePanel() {
@@ -17,16 +19,18 @@ export function GCodePanel() {
   const resumeJob = useSerialStore((s) => s.resumeJob);
   const stopJob = useSerialStore((s) => s.stopJob);
 
-  const [generated, setGenerated] = useState<ReturnType<typeof generateGcode> | null>(null);
+  const result = useGcodeStore((s) => s.result);
+  const setResult = useGcodeStore((s) => s.setResult);
+  const setMainView = useUiStore((s) => s.setMainView);
   const [waitForAck, setWaitForAck] = useState(true);
 
   const canGenerate = items.some((i) => i.visible);
 
-  const result = useMemo(() => generated, [generated]);
-
   const regenerate = () => {
     const res = generateGcode(items, frame, settings);
-    setGenerated(res);
+    setResult(res);
+    // Jump to the G-code toolpath view so the user immediately sees what was generated.
+    setMainView("gcode");
   };
 
   const download = () => {

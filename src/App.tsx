@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Toolbar } from "./components/Toolbar";
 import { CanvasArea } from "./components/CanvasArea";
+import { GcodePreviewPanel } from "./components/GcodePreviewPanel";
 import { LayersPanel } from "./components/LayersPanel";
 import { PropertiesPanel } from "./components/PropertiesPanel";
 import { MachineSettingsPanel } from "./components/MachineSettingsPanel";
@@ -8,6 +9,7 @@ import { GCodePanel } from "./components/GCodePanel";
 import { ConsolePanel } from "./components/ConsolePanel";
 import { SerialStatusBar } from "./components/SerialStatusBar";
 import { useSvgFileImport } from "./hooks/useSvgFileImport";
+import { useUiStore } from "./store/uiStore";
 
 type RightTab = "design" | "machine" | "gcode" | "console";
 
@@ -23,6 +25,8 @@ export default function App() {
   const [isDragOver, setIsDragOver] = useState(false);
   const dragDepth = useRef(0);
   const importFiles = useSvgFileImport();
+  const mainView = useUiStore((s) => s.mainView);
+  const setMainView = useUiStore((s) => s.setMainView);
 
   const onDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
@@ -70,7 +74,17 @@ export default function App() {
         </aside>
 
         <main className="canvas-container">
-          <CanvasArea />
+          <nav className="main-tab-bar">
+            <button className={`main-tab ${mainView === "design" ? "active" : ""}`} onClick={() => setMainView("design")}>
+              Design
+            </button>
+            <button className={`main-tab ${mainView === "gcode" ? "active" : ""}`} onClick={() => setMainView("gcode")}>
+              G-code
+            </button>
+          </nav>
+          <div className="canvas-container-body">
+            {mainView === "design" ? <CanvasArea /> : <GcodePreviewPanel />}
+          </div>
         </main>
 
         <aside className="right-sidebar">

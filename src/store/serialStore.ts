@@ -19,6 +19,8 @@ interface SerialState {
   knownPorts: KnownPort[];
   logs: LogEntry[];
   ackWaiters: ((line: string) => boolean)[];
+  /** True once we've seen a GRBL alarm/unlock-required message on this connection. */
+  needsUnlock: boolean;
 
   job: {
     status: JobStatus;
@@ -28,6 +30,7 @@ interface SerialState {
     waitForAck: boolean;
     ackTimeoutMs: number;
     interLineDelayMs: number;
+    startedAt: number | null;
   };
   jobAbort: boolean;
   jobPaused: boolean;
@@ -47,6 +50,10 @@ interface SerialState {
   stopJob: () => void;
 }
 
+/** Matches GRBL's startup alarm-state hint, e.g. "[MSG:'$H'|'$X' to unlock]", and generic "ALARM:" lines. */
+const GRBL_UNLOCK_HINT_RE = /\$x.*unlock|alarm/i;
+const GRBL_UNLOCKED_RE = /\bunlocked\b|\bidle\b/i;
+
 let logIdCounter = 1;
 
 function portLabel(port: SerialPort, idx: number): string {
@@ -64,7 +71,7 @@ export const useSerialStore = create<SerialState>((set, get) => {
       set({ connected: true, connecting: false });
       pushLog("info", "Connected.");
     } else if (status === "disconnected") {
-      set({ connected: false, connecting: false });
+      set({ connected: false, connecting: false, needsUnlock: false });
       pushLog("info", "Disconnected.");
     } else if (status === "error") {
       set({ connected: false, connecting: false });
@@ -78,6 +85,11 @@ export const useSerialStore = create<SerialState>((set, get) => {
     if (waiters.length > 0) {
       const remaining = waiters.filter((w) => !w(line));
       if (remaining.length !== waiters.length) set({ ackWaiters: remaining });
+    }
+    if (GRBL_UNLOCK_HINT_RE.test(line)) {
+      set({ needsUnlock: true });
+    } else if (GRBL_UNLOCKED_RE.test(line) && get().needsUnlock) {
+      set({ needsUnlock: false });
     }
   };
 
@@ -97,6 +109,7 @@ export const useSerialStore = create<SerialState>((set, get) => {
     knownPorts: [],
     logs: [],
     ackWaiters: [],
+    needsUnlock: false,
     job: {
       status: "idle",
       currentLine: 0,
@@ -105,6 +118,7 @@ export const useSerialStore = create<SerialState>((set, get) => {
       waitForAck: true,
       ackTimeoutMs: 4000,
       interLineDelayMs: 30,
+      startedAt: null,
     },
     jobAbort: false,
     jobPaused: false,
@@ -178,7 +192,17 @@ export const useSerialStore = create<SerialState>((set, get) => {
       set({
         jobAbort: false,
         jobPaused: false,
-        job: { ...get().job, status: "running", currentLine: 0, totalLines: lines.length, lines, waitForAck, ackTimeoutMs, interLineDelayMs },
+        job: {
+          ...get().job,
+          status: "running",
+          currentLine: 0,
+          totalLines: lines.length,
+          lines,
+          waitForAck,
+          ackTimeoutMs,
+          interLineDelayMs,
+          startedAt: Date.now(),
+        },
       });
       pushLog("info", `Job started: ${lines.length} lines.`);
 

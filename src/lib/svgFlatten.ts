@@ -138,6 +138,27 @@ function yieldToMain(): Promise<void> {
 
 const YIELD_EVERY_N_ELEMENTS = 25;
 
+/**
+ * Elements with no fill and no stroke render nothing visible in the original artwork - these are
+ * usually leftover construction/guide geometry (bounding boxes, baseline markers, etc.) from
+ * text-to-path or export tools, not intended cut lines, so we skip them.
+ */
+function isVisuallyInvisible(el: Element): boolean {
+  const style = window.getComputedStyle(el);
+  const opacity = parseFloat(style.opacity || "1");
+  if (Number.isFinite(opacity) && opacity <= 0) return true;
+
+  const fill = style.fill;
+  const stroke = style.stroke;
+  const fillOpacity = parseFloat(style.fillOpacity || "1");
+  const strokeOpacity = parseFloat(style.strokeOpacity || "1");
+
+  const fillInvisible = fill === "none" || fill === "transparent" || fillOpacity <= 0;
+  const strokeInvisible = stroke === "none" || stroke === "transparent" || strokeOpacity <= 0;
+
+  return fillInvisible && strokeInvisible;
+}
+
 function isClosedShape(el: Element): boolean {
   const tag = el.tagName.toLowerCase();
   if (tag === "circle" || tag === "ellipse" || tag === "polygon" || tag === "rect") return true;
@@ -196,6 +217,7 @@ export async function parseSvgToPaths(svgText: string): Promise<ParsedSvgResult>
       if (!GEOMETRY_TAGS.has(tag)) continue;
       if (isInsideSkippedAncestor(el, imported)) continue;
       if (anyAncestorHidden(el, imported)) continue;
+      if (isVisuallyInvisible(el)) continue;
 
       const geomEl = el as unknown as SVGGeometryElement;
       if (typeof geomEl.getCTM !== "function" || typeof geomEl.getTotalLength !== "function") continue;
