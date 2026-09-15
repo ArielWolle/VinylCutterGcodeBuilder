@@ -118,6 +118,7 @@ export function GCodePanel() {
               </div>
               <span className="muted small">
                 Line {jobCurrentLine + 1} / {jobTotalLines} &mdash; {jobStatus}
+                {jobStatus === "running" && " \u00B7 keeping this tab awake while sending"}
               </span>
               <div className="btn-row">
                 {jobStatus === "running" ? (

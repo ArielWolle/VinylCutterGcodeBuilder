@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { SerialConnection, sendGcodeJob } from "../lib/serial";
+import { setKeepAwake } from "../lib/wakeLock";
 import type { JobStatus, LogEntry } from "../types";
 
 export const COMMON_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200, 230400, 250000];
@@ -230,6 +231,10 @@ export const useSerialStore = create<SerialState>((set, get) => {
         },
       });
       pushLog("info", `Job started: ${lines.length} lines.`);
+      // Keep the screen (and machine) awake while commands are actively streaming out, the same
+      // way a video player does during playback - a long cut job shouldn't get interrupted by
+      // the OS putting the display/computer to sleep.
+      void setKeepAwake(true);
 
       const result = await sendGcodeJob(connection, lines, {
         waitForAck,
@@ -252,13 +257,16 @@ export const useSerialStore = create<SerialState>((set, get) => {
 
       set((s) => ({ job: { ...s.job, status: result === "done" ? "done" : "stopped" } }));
       pushLog("info", result === "done" ? "Job complete." : "Job stopped.");
+      void setKeepAwake(false);
     },
 
     pauseJob: () => {
       set({ jobPaused: true, job: { ...get().job, status: "paused" } });
+      void setKeepAwake(false);
     },
     resumeJob: () => {
       set({ jobPaused: false, job: { ...get().job, status: "running" } });
+      void setKeepAwake(true);
     },
     stopJob: () => {
       set({ jobAbort: true, jobPaused: false });
