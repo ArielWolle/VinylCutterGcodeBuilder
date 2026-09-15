@@ -31,6 +31,10 @@ interface SerialState {
     ackTimeoutMs: number;
     interLineDelayMs: number;
     startedAt: number | null;
+    /** Machine-space (mm) position implied by the last G0/G1 X/Y sent, tracked modally (an axis
+     *  not mentioned in a line keeps its previous value) so the G-code preview can show a live
+     *  "where's the cutter right now" marker while a job is running. */
+    currentPos: { x: number; y: number } | null;
   };
   jobAbort: boolean;
   jobPaused: boolean;
@@ -53,6 +57,21 @@ interface SerialState {
 /** Matches GRBL's startup alarm-state hint, e.g. "[MSG:'$H'|'$X' to unlock]", and generic "ALARM:" lines. */
 const GRBL_UNLOCK_HINT_RE = /\$x.*unlock|alarm/i;
 const GRBL_UNLOCKED_RE = /\bunlocked\b|\bidle\b/i;
+
+const X_RE = /X(-?[0-9]*\.?[0-9]+)/i;
+const Y_RE = /Y(-?[0-9]*\.?[0-9]+)/i;
+
+/** Parses X/Y out of a G-code line, keeping any axis not mentioned at its previous value
+ *  (G-code motion is modal - X100 alone doesn't change Y). Returns null if the line has no
+ *  recognizable X or Y and there's no previous position to carry forward. */
+function updatePositionFromLine(line: string, prev: { x: number; y: number } | null): { x: number; y: number } | null {
+  const xm = X_RE.exec(line);
+  const ym = Y_RE.exec(line);
+  if (!xm && !ym) return prev;
+  const x = xm ? parseFloat(xm[1]) : prev?.x ?? 0;
+  const y = ym ? parseFloat(ym[1]) : prev?.y ?? 0;
+  return { x, y };
+}
 
 let logIdCounter = 1;
 
@@ -119,6 +138,7 @@ export const useSerialStore = create<SerialState>((set, get) => {
       ackTimeoutMs: 4000,
       interLineDelayMs: 30,
       startedAt: null,
+      currentPos: null,
     },
     jobAbort: false,
     jobPaused: false,
@@ -185,6 +205,10 @@ export const useSerialStore = create<SerialState>((set, get) => {
         pushLog("error", "Not connected.");
         return;
       }
+      if (get().needsUnlock) {
+        pushLog("error", "Refusing to send: controller is locked/in an alarm state. Unlock it first ($X).");
+        return;
+      }
       const waitForAck = opts?.waitForAck ?? get().job.waitForAck;
       const ackTimeoutMs = opts?.ackTimeoutMs ?? get().job.ackTimeoutMs;
       const interLineDelayMs = opts?.interLineDelayMs ?? get().job.interLineDelayMs;
@@ -202,6 +226,7 @@ export const useSerialStore = create<SerialState>((set, get) => {
           ackTimeoutMs,
           interLineDelayMs,
           startedAt: Date.now(),
+          currentPos: null,
         },
       });
       pushLog("info", `Job started: ${lines.length} lines.`);
@@ -212,7 +237,9 @@ export const useSerialStore = create<SerialState>((set, get) => {
         ackTimeoutMs,
         interLineDelayMs,
         onProgress: (index, total, line) => {
-          set((s) => ({ job: { ...s.job, currentLine: index, totalLines: total } }));
+          set((s) => ({
+            job: { ...s.job, currentLine: index, totalLines: total, currentPos: updatePositionFromLine(line, s.job.currentPos) },
+          }));
           pushLog("tx", line);
         },
         isAborted: () => get().jobAbort,

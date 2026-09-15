@@ -92,12 +92,11 @@ export function generateGcode(
     }
   }
 
-  // 2. Order entries for minimal travel / blade swivel (if enabled).
-  const ordered = planToolpathOrder(entries, settings.optimizeToolpath);
-
-  // 3. Apply drag-knife blade compensation + overcut to closed loops when in cut mode.
+  // 2. Order entries for minimal travel, optionally refined for blade-swivel alignment.
   const toolRadius = settings.cutMode === "cut" ? settings.toolDiameterMm / 2 : 0;
   const overcut = settings.cutMode === "cut" ? settings.overcutMm : 0;
+  const alignBladeDirection = settings.optimizeToolpath && toolRadius > 0;
+  const ordered = planToolpathOrder(entries, settings.optimizeToolpath, alignBladeDirection);
 
   const finalEntries = ordered.map((entry) => {
     if (!entry.closed || settings.cutMode !== "cut") return entry;

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useDesignStore } from "../store/designStore";
 import { useGcodeStore } from "../store/gcodeStore";
+import { useSerialStore } from "../store/serialStore";
 
 interface Pt {
   x: number;
@@ -17,6 +18,8 @@ export function GcodePreviewPanel() {
   const view = useDesignStore((s) => s.view);
   const setView = useDesignStore((s) => s.setView);
   const result = useGcodeStore((s) => s.result);
+  const jobStatus = useSerialStore((s) => s.job.status);
+  const currentPos = useSerialStore((s) => s.job.currentPos);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
@@ -121,12 +124,31 @@ export function GcodePreviewPanel() {
           <line x1={origin.x - originSize} y1={origin.y - originSize} x2={origin.x + originSize} y2={origin.y + originSize} stroke="#ff4d4f" strokeWidth={2} strokeLinecap="round" />
           <line x1={origin.x - originSize} y1={origin.y + originSize} x2={origin.x + originSize} y2={origin.y - originSize} stroke="#ff4d4f" strokeWidth={2} strokeLinecap="round" />
         </g>
+
+        {currentPos &&
+          (() => {
+            const p = toScreen(currentPos.x, currentPos.y);
+            const running = jobStatus === "running";
+            return (
+              <g className={`cutter-marker${running ? " running" : ""}`}>
+                <circle className="cutter-marker-ring" cx={p.x} cy={p.y} r={9} fill="none" stroke="#39d98a" strokeWidth={2} />
+                <circle cx={p.x} cy={p.y} r={3} fill="#39d98a" />
+              </g>
+            );
+          })()}
       </svg>
 
       <div className="gcode-legend">
         <span className="legend-swatch cut" /> Cut (G1)
         <span className="legend-swatch travel" /> Travel (G0)
       </div>
+
+      {currentPos && (
+        <div className="cutter-pos-readout">
+          <span className={`status-dot ${jobStatus === "running" ? "on" : "off"}`} />
+          Cutter: X{currentPos.x.toFixed(2)} Y{currentPos.y.toFixed(2)}
+        </div>
+      )}
 
       {!result && (
         <div className="canvas-hint">No G-code generated yet. Use "Generate G-code" in the G-code tab on the right.</div>

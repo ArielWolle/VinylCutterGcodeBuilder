@@ -223,19 +223,29 @@ export function greedyOrderEntries(entries: PathEntry[]): PathEntry[] {
 }
 
 /**
- * Full toolpath planning pass: optionally reorders entries for minimal travel, then walks
- * through with a small lookahead window to prefer the next entry whose entry direction best
- * matches the blade's current heading (reduces swivel wear/time), rotating closed-loop starts
- * to match as it goes.
+ * Full toolpath planning pass.
+ *
+ * `optimizeTravel` runs a pure greedy nearest-neighbour pass to minimize travel distance between
+ * cuts - this is the main thing that matters for "why does it jump around", and applies
+ * regardless of tool type.
+ *
+ * `alignBladeDirection` should only be enabled when there's an actual physical drag-knife blade
+ * with a real swivel cost (cutMode === "cut" && toolDiameterMm > 0). It re-picks among the next
+ * few already-nearby candidates based on entry-direction alignment with the blade's current
+ * heading, which reduces swivel wear/time - but it works *against* travel distance, so enabling
+ * it when there's no blade to align (toolDiameterMm === 0) only makes the path worse for no
+ * benefit at all.
  */
-export function planToolpathOrder(entries: PathEntry[], optimize: boolean): PathEntry[] {
-  let remaining = optimize ? greedyOrderEntries(entries) : entries.slice();
-  const ordered: PathEntry[] = [];
+export function planToolpathOrder(entries: PathEntry[], optimizeTravel: boolean, alignBladeDirection: boolean): PathEntry[] {
+  const remaining = optimizeTravel ? greedyOrderEntries(entries) : entries.slice();
+  if (!alignBladeDirection) return remaining;
+
+  const reordered: PathEntry[] = [];
   let lastBladeDir: Vec2 | null = null;
 
   while (remaining.length) {
     let bestIdx = 0;
-    if (optimize && lastBladeDir && remaining.length > 1) {
+    if (lastBladeDir && remaining.length > 1) {
       const limit = Math.min(LOOKAHEAD, remaining.length);
       let bestScore = -Infinity;
       for (let i = 0; i < limit; i++) {
@@ -249,12 +259,12 @@ export function planToolpathOrder(entries: PathEntry[], optimize: boolean): Path
     }
 
     let entry = remaining.splice(bestIdx, 1)[0];
-    if (optimize && entry.closed) {
+    if (entry.closed) {
       entry = { ...entry, lines: reorderLoopForBladeAlignment(entry.lines, lastBladeDir) };
     }
-    ordered.push(entry);
+    reordered.push(entry);
     lastBladeDir = lineDirection(entry.lines[entry.lines.length - 1]);
   }
 
-  return ordered;
+  return reordered;
 }

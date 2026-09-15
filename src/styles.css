@@ -139,6 +139,46 @@ body {
   background: rgba(91, 141, 238, 0.08);
 }
 
+.cutter-marker .cutter-marker-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.cutter-marker.running .cutter-marker-ring {
+  animation: cutter-pulse 1s ease-in-out infinite;
+}
+@keyframes cutter-pulse {
+  0% {
+    r: 9;
+    opacity: 1;
+  }
+  70% {
+    r: 16;
+    opacity: 0.15;
+  }
+  100% {
+    r: 9;
+    opacity: 1;
+  }
+}
+
+.cutter-pos-readout {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--success);
+  color: var(--success);
+  padding: 5px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: "Consolas", "Courier New", monospace;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 5;
+}
+
 .gcode-legend {
   position: absolute;
   top: 8px;

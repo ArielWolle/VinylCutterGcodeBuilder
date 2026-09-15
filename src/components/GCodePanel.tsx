@@ -12,6 +12,8 @@ export function GCodePanel() {
   const ensureItemGeometry = useDesignStore((s) => s.ensureItemGeometry);
   const settings = useMachineStore((s) => s.settings);
   const connected = useSerialStore((s) => s.connected);
+  const needsUnlock = useSerialStore((s) => s.needsUnlock);
+  const sendCommand = useSerialStore((s) => s.sendCommand);
   const jobStatus = useSerialStore((s) => s.job.status);
   const jobCurrentLine = useSerialStore((s) => s.job.currentLine);
   const jobTotalLines = useSerialStore((s) => s.job.totalLines);
@@ -57,7 +59,7 @@ export function GCodePanel() {
   };
 
   const sendToMachine = async () => {
-    if (!result) return;
+    if (!result || needsUnlock) return;
     await startJob(result.lines, { waitForAck });
   };
 
@@ -92,9 +94,23 @@ export function GCodePanel() {
             <span>Wait for "ok" acknowledgement between lines</span>
           </label>
           {!jobRunning ? (
-            <button className="btn primary" onClick={sendToMachine} disabled={!connected}>
-              {connected ? "Send G-code over serial" : "Connect a serial device first"}
-            </button>
+            connected && needsUnlock ? (
+              <div className="unlock-banner">
+                <span>Controller is locked/in an alarm state - unlock it before sending a job.</span>
+                <div className="btn-row">
+                  <button className="btn small" onClick={() => sendCommand("$X")}>
+                    Unlock ($X)
+                  </button>
+                  <button className="btn small" onClick={() => sendCommand("$H")}>
+                    Home ($H)
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button className="btn primary" onClick={sendToMachine} disabled={!connected}>
+                {connected ? "Send G-code over serial" : "Connect a serial device first"}
+              </button>
+            )
           ) : (
             <div className="job-controls">
               <div className="progress-bar">

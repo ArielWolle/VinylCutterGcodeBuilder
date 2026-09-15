@@ -34,7 +34,9 @@ export const defaultMachineSettings: MachineSettings = {
   originOffsetX: 0,
   originOffsetY: 0,
   invertY: false,
-  startGcode: "G21\nG90\nG28",
+  // M05 first so the spindle/blade is guaranteed off before homing or any other startup motion
+  // (matters most for headActuation === "spindle", but is a harmless no-op otherwise).
+  startGcode: "M05\nG21\nG90\nG28",
   endGcode: "M05\nG0 X0 Y0",
   decimals: 3,
 };
