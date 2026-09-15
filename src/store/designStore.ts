@@ -123,7 +123,7 @@ export const useDesignStore = create<DesignState>()(
     const promise = (async () => {
       let paths: FlattenedPath[] = [];
       try {
-        paths = await flattenSvgGeometry(rawSvg, item.naturalWidthMm, item.naturalHeightMm, item.viewBox);
+        paths = await flattenSvgGeometry(rawSvg, item.naturalWidthMm, item.naturalHeightMm);
       } catch (err) {
         console.error("Failed to flatten SVG geometry for cutting:", err);
         set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) }));

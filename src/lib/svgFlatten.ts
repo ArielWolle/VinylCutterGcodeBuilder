@@ -12,7 +12,7 @@ export interface SvgMetadata {
 
 const GEOMETRY_TAGS = new Set(["path", "rect", "circle", "ellipse", "line", "polyline", "polygon"]);
 
-const SKIP_ANCESTOR_TAGS = new Set(["defs", "clipPath", "mask", "symbol", "pattern"]);
+const SKIP_ANCESTOR_TAGS = new Set(["defs", "clippath", "mask", "symbol", "pattern"]);
 
 function isInsideSkippedAncestor(el: Element, root: Element): boolean {
   let node: Element | null = el.parentElement;
@@ -282,21 +282,25 @@ function splitPathIntoSubpathElements(pathEl: Element): { el: SVGGeometryElement
 }
 
 /**
- * Flattens an SVG's cut/draw geometry into mm-space polylines, mapped into the item's local
- * (Y-up, bottom-left origin) space using the *declared* naturalWidthMm/naturalHeightMm/viewBox
- * (from parseSvgMetadata) as the authoritative frame - not a recomputed tightest content bbox -
- * so this can run independently in the background without ever changing the item's on-canvas
- * size/position that the user is already looking at and possibly dragging.
+ * Flattens an SVG's cut/draw geometry into mm-space polylines, in the item's local (Y-up,
+ * bottom-left origin) space at the *declared* naturalWidthMm x naturalHeightMm scale (from
+ * parseSvgMetadata) - not a recomputed tightest content bbox - so this can run independently in
+ * the background without ever changing the item's on-canvas size/position that the user is
+ * already looking at and possibly dragging. The caller (designStore.ensureItemGeometry) tightens
+ * the box to the actual content afterwards.
  *
  * Uses the browser's native SVG geometry engine (getTotalLength / getPointAtLength / getCTM) so
  * nested transforms and curve/arc math are handled correctly for us, and yields back to the
  * browser periodically so it never blocks the UI thread for the whole duration.
+ *
+ * getCTM() resolves all the way to the root <svg>'s own established viewport, which already
+ * bakes in the viewBox's origin offset and its scale to the declared width/height - so sampled
+ * points only need a flat PX_TO_MM conversion, not a second viewBox-based scaling.
  */
 export async function flattenSvgGeometry(
   svgText: string,
   naturalWidthMm: number,
-  naturalHeightMm: number,
-  viewBox: SvgViewBox
+  naturalHeightMm: number
 ): Promise<FlattenedPath[]> {
   const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
   const svg = doc.documentElement as unknown as SVGSVGElement;
@@ -313,10 +317,6 @@ export async function flattenSvgGeometry(
   document.body.appendChild(host);
 
   try {
-    const vb = viewBox;
-    const mmPerUnitX = vb.w > 0 ? naturalWidthMm / vb.w : PX_TO_MM;
-    const mmPerUnitY = vb.h > 0 ? naturalHeightMm / vb.h : PX_TO_MM;
-
     const all = Array.from(imported.querySelectorAll("*"));
 
     // Pass 1: gather candidate geometry elements + their CTM/length up front (cheap calls),
@@ -368,10 +368,12 @@ export async function flattenSvgGeometry(
       const { el, ctm, total, closed } = candidates[i];
       const pxPoints = samplePoints(el, ctm, total, stepLen);
       if (pxPoints.length >= 2) {
-        const points: [number, number][] = pxPoints.map(([x, y]) => [
-          (x - vb.x) * mmPerUnitX,
-          naturalHeightMm - (y - vb.y) * mmPerUnitY,
-        ]);
+        // getCTM() resolves all the way to the root <svg>'s own established viewport coordinate
+        // system - which already has the viewBox's origin offset and viewBox-to-declared-size
+        // scaling baked in - so these points are already in the same "px" space that
+        // naturalWidthMm/HeightMm were derived from. A flat PX_TO_MM conversion is all that's
+        // needed; re-applying the viewBox scale here would double-apply it.
+        const points: [number, number][] = pxPoints.map(([x, y]) => [x * PX_TO_MM, naturalHeightMm - y * PX_TO_MM]);
         paths.push({ points, closed });
       }
 
