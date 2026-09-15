@@ -373,20 +373,23 @@ export function CanvasArea() {
             const cx = (item.naturalWidthMm * item.transform.scaleX) / 2;
             const cy = (item.naturalHeightMm * item.transform.scaleY) / 2;
             const transform = `translate(${item.transform.x} ${item.transform.y}) rotate(${item.transform.rotation} ${cx} ${cy}) scale(${item.transform.scaleX} ${item.transform.scaleY})`;
-            const isSelected = item.id === selectedId;
             return (
               <g key={item.id} transform={transform} opacity={item.locked ? 0.6 : 1}>
-                {item.paths.map((p, idx) => (
-                  <polyline
-                    key={idx}
-                    points={p.points.map(([x, y]) => `${x},${y}`).join(" ")}
-                    fill="none"
-                    stroke={isSelected ? "#ffb347" : "#e7ecf5"}
-                    strokeWidth={0.35 / (view.pixelsPerMm * item.transform.scaleX)}
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
+                {/* Native SVG content is inherently Y-down/top-left; flip it once here so it
+                    renders correctly within our Y-up/bottom-left local item space (paths.ts
+                    flattens geometry the same way, so both representations line up). */}
+                <g transform={`translate(0 ${item.naturalHeightMm}) scale(1 -1)`}>
+                  <svg
+                    x={0}
+                    y={0}
+                    width={item.naturalWidthMm}
+                    height={item.naturalHeightMm}
+                    viewBox={`${item.viewBox.x} ${item.viewBox.y} ${item.viewBox.w} ${item.viewBox.h}`}
+                    preserveAspectRatio="none"
+                    style={{ overflow: "visible" }}
+                    dangerouslySetInnerHTML={{ __html: item.innerSvgHTML }}
                   />
-                ))}
+                </g>
               </g>
             );
           })}

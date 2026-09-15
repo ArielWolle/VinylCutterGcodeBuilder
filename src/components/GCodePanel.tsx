@@ -9,6 +9,7 @@ import { estimateJobTimeSeconds, generateGcode } from "../lib/gcode";
 export function GCodePanel() {
   const frame = useDesignStore((s) => s.frame);
   const items = useDesignStore((s) => s.items);
+  const ensureItemGeometry = useDesignStore((s) => s.ensureItemGeometry);
   const settings = useMachineStore((s) => s.settings);
   const connected = useSerialStore((s) => s.connected);
   const jobStatus = useSerialStore((s) => s.job.status);
@@ -23,14 +24,25 @@ export function GCodePanel() {
   const setResult = useGcodeStore((s) => s.setResult);
   const setMainView = useUiStore((s) => s.setMainView);
   const [waitForAck, setWaitForAck] = useState(true);
+  const [preparing, setPreparing] = useState(false);
 
   const canGenerate = items.some((i) => i.visible);
 
-  const regenerate = () => {
-    const res = generateGcode(items, frame, settings);
-    setResult(res);
-    // Jump to the G-code toolpath view so the user immediately sees what was generated.
-    setMainView("gcode");
+  const regenerate = async () => {
+    setPreparing(true);
+    try {
+      // Cut/draw geometry is flattened in the background right after import (see
+      // designStore.importSvgFile) so this normally resolves instantly; it only actually waits
+      // if generate is clicked immediately after dropping in a very complex SVG.
+      await Promise.all(items.filter((i) => i.visible).map((i) => ensureItemGeometry(i.id)));
+      const freshItems = useDesignStore.getState().items;
+      const res = generateGcode(freshItems, frame, settings);
+      setResult(res);
+      // Jump to the G-code toolpath view so the user immediately sees what was generated.
+      setMainView("gcode");
+    } finally {
+      setPreparing(false);
+    }
   };
 
   const download = () => {
@@ -54,8 +66,8 @@ export function GCodePanel() {
   return (
     <div className="panel">
       <h3>G-code</h3>
-      <button className="btn primary" onClick={regenerate} disabled={!canGenerate}>
-        Generate G-code
+      <button className="btn primary" onClick={regenerate} disabled={!canGenerate || preparing}>
+        {preparing ? "Preparing geometry\u2026" : "Generate G-code"}
       </button>
       {!canGenerate && <p className="muted small">Import and place at least one visible SVG first.</p>}
 

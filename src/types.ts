@@ -21,16 +21,38 @@ export interface FlattenedPath {
   closed: boolean;
 }
 
+export interface SvgViewBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface SvgItem {
   id: string;
   name: string;
-  /** Natural bounding-box size in mm at scale 1 (before user transform). */
+  /** Natural bounding-box size in mm at scale 1 (before user transform), derived instantly from
+   *  the SVG's own width/height/viewBox attributes - no geometry sampling required. */
   naturalWidthMm: number;
   naturalHeightMm: number;
   transform: ItemTransform;
-  paths: FlattenedPath[];
   visible: boolean;
   locked: boolean;
+
+  /** Original SVG's viewBox, used to map its native (Y-down) content into our local
+   *  (Y-up, bottom-left origin) item space when rendering it natively on the canvas. */
+  viewBox: SvgViewBox;
+  /** Serialized inner markup of the root <svg> (ids namespaced to this item to avoid collisions
+   *  between multiple imports), embedded directly for instant, exact-fidelity rendering. */
+  innerSvgHTML: string;
+
+  /**
+   * Flattened cut/draw geometry, computed in the background after import so dropping an SVG onto
+   * the canvas is instant. `null` while the background conversion is still running - G-code
+   * generation awaits it (see designStore.ensureItemGeometry), but dragging/resizing on the
+   * canvas never needs to wait since it only uses naturalWidthMm/HeightMm + the native SVG render.
+   */
+  paths: FlattenedPath[] | null;
 }
 
 /** How the head is actuated between travel and work moves. */

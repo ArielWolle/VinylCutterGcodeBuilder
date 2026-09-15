@@ -1,8 +1,15 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { EditorTool, FrameSettings, SvgItem } from "../types";
-import { parseSvgToPaths } from "../lib/svgFlatten";
+import type { EditorTool, FlattenedPath, FrameSettings, SvgItem } from "../types";
+import { flattenSvgGeometry, parseSvgMetadata } from "../lib/svgFlatten";
 import { defaultTransform } from "../lib/geometryTransform";
+
+// Raw SVG text per item id, kept outside the reactive store (it's only needed to (re)run the
+// background geometry flatten, never for rendering) plus in-flight flatten promises so multiple
+// callers (e.g. clicking "Generate G-code" while a background flatten is still running) can all
+// await the same work instead of triggering it twice.
+const rawSvgById = new Map<string, string>();
+const pendingFlattens = new Map<string, Promise<void>>();
 
 interface MeasurePoints {
   a: { x: number; y: number } | null;
@@ -30,6 +37,9 @@ interface DesignState {
   setView: (view: Partial<ViewState>) => void;
 
   importSvgFile: (file: File) => Promise<string>;
+  /** Resolves once the item's cut/draw geometry has been flattened in the background (see
+   *  lib/svgFlatten.ts). Safe to call any number of times / concurrently for the same item. */
+  ensureItemGeometry: (id: string) => Promise<void>;
   removeItem: (id: string) => void;
   selectItem: (id: string | null) => void;
   updateTransform: (id: string, transform: Partial<SvgItem["transform"]>) => void;
@@ -66,35 +76,74 @@ export const useDesignStore = create<DesignState>()(
 
   importSvgFile: async (file: File) => {
     set({ importing: true });
-    // Let the browser paint the "Importing..." state before the heavy synchronous SVG
-    // sampling work begins, otherwise it can start before React ever gets a frame to render it.
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     try {
-      const text = await file.text();
-      const parsed = await parseSvgToPaths(text);
       const id = crypto.randomUUID();
+      const text = await file.text();
+      // Fast, synchronous metadata-only parse (size/viewBox/markup) - no geometry sampling, so
+      // this is effectively instant even for very complex files. The item is draggable/resizable
+      // immediately, rendered as the real native SVG; actual cut/draw geometry is flattened
+      // separately in the background (kicked off below) without blocking the import at all.
+      const meta = parseSvgMetadata(text, id);
+      rawSvgById.set(id, text);
+
       const item: SvgItem = {
         id,
         name: file.name.replace(/\.svg$/i, ""),
-        naturalWidthMm: parsed.naturalWidthMm,
-        naturalHeightMm: parsed.naturalHeightMm,
-        transform: centerTransformFor(parsed, get().frame),
-        paths: parsed.paths,
+        naturalWidthMm: meta.naturalWidthMm,
+        naturalHeightMm: meta.naturalHeightMm,
+        transform: centerTransformFor(meta, get().frame),
+        viewBox: meta.viewBox,
+        innerSvgHTML: meta.innerSvgHTML,
+        paths: null,
         visible: true,
         locked: false,
       };
       set((s) => ({ items: [...s.items, item], selectedId: id }));
+
+      // Fire-and-forget: start the background flatten now so it's typically already done by the
+      // time the user gets around to generating G-code, without making them wait for it here.
+      void get().ensureItemGeometry(id);
+
       return id;
     } finally {
       set({ importing: false });
     }
   },
 
-  removeItem: (id) =>
+  ensureItemGeometry: async (id: string) => {
+    const existing = pendingFlattens.get(id);
+    if (existing) return existing;
+
+    const item = get().items.find((i) => i.id === id);
+    if (!item || item.paths) return;
+
+    const rawSvg = rawSvgById.get(id);
+    if (!rawSvg) return;
+
+    const promise = (async () => {
+      let paths: FlattenedPath[] = [];
+      try {
+        paths = await flattenSvgGeometry(rawSvg, item.naturalWidthMm, item.naturalHeightMm, item.viewBox);
+      } catch (err) {
+        console.error("Failed to flatten SVG geometry for cutting:", err);
+      } finally {
+        set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) }));
+        pendingFlattens.delete(id);
+      }
+    })();
+
+    pendingFlattens.set(id, promise);
+    return promise;
+  },
+
+  removeItem: (id) => {
+    rawSvgById.delete(id);
+    pendingFlattens.delete(id);
     set((s) => ({
       items: s.items.filter((i) => i.id !== id),
       selectedId: s.selectedId === id ? null : s.selectedId,
-    })),
+    }));
+  },
 
   selectItem: (id) => set({ selectedId: id }),
 

@@ -21,8 +21,11 @@ export const defaultMachineSettings: MachineSettings = {
   spindleOnCode: "M03",
   spindleOffCode: "M05",
 
-  toolDiameterMm: 0.9,
-  overcutMm: 0.5,
+  // Off by default: this is a drag-knife swivel/overcut feature and should be an explicit
+  // opt-in once you've measured your actual blade, not a silent default that can introduce
+  // corner artifacts on cuts that never asked for it.
+  toolDiameterMm: 0,
+  overcutMm: 0,
   optimizeToolpath: true,
 
   passes: 1,

@@ -79,7 +79,7 @@ export function generateGcode(
   // 1. Build machine-space path entries (open + closed) from every visible item, in layer order.
   const entries: PathEntry[] = [];
   for (const item of items) {
-    if (!item.visible) continue;
+    if (!item.visible || !item.paths) continue;
     for (const path of item.paths) {
       if (path.points.length < 2) continue;
       const machinePts = path.points.map(([lx, ly]) => {
