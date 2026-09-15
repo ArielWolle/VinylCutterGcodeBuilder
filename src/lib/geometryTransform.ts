@@ -53,21 +53,29 @@ export function worldToLocal(item: SvgItem, wx: number, wy: number): Point {
   return { x: rx / scaleX, y: ry / scaleY };
 }
 
-/** World-space center of the item's bbox. */
+/**
+ * World-space center of the item's bbox.
+ *
+ * IMPORTANT: localToWorld() already multiplies its (lx, ly) arguments by scaleX/scaleY
+ * internally, so callers must pass *natural* (unscaled) local coordinates here, not
+ * pre-multiplied ones - otherwise the scale gets applied twice (scaleX²), which is invisible
+ * at scale 1 but silently breaks every handle/box/resize computation the moment an item is
+ * resized.
+ */
 export function itemCenter(item: SvgItem): Point {
-  const w = item.naturalWidthMm * item.transform.scaleX;
-  const h = item.naturalHeightMm * item.transform.scaleY;
-  return localToWorld(item, w / 2, h / 2);
+  return localToWorld(item, item.naturalWidthMm / 2, item.naturalHeightMm / 2);
 }
 
 /**
  * The 4 corners of the item's (rotated) bbox in world space, walked consistently around the
  * perimeter: local (0,0) [bottom-left], (w,0) [bottom-right], (w,h) [top-right], (0,h) [top-left]
  * - remember local Y increases upward, so "h" is the top edge, not the bottom.
+ *
+ * Natural (unscaled) dimensions are passed to localToWorld() - see the note on itemCenter().
  */
 export function itemWorldCorners(item: SvgItem): [Point, Point, Point, Point] {
-  const w = item.naturalWidthMm * item.transform.scaleX;
-  const h = item.naturalHeightMm * item.transform.scaleY;
+  const w = item.naturalWidthMm;
+  const h = item.naturalHeightMm;
   return [
     localToWorld(item, 0, 0),
     localToWorld(item, w, 0),
