@@ -169,6 +169,68 @@ function isClosedShape(el: Element): boolean {
   return false;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+const FIRST_MOVE_RE = /^[Mm]\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)[\s,]+([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)/;
+
+/**
+ * A single <path> "d" attribute can contain multiple subpaths (each starting with its own M/m
+ * command) - most commonly an outer contour plus one or more inner "holes" for letters like
+ * O, A, R, e, etc. Treating the whole d string as one continuous curve (as getTotalLength /
+ * getPointAtLength naturally do) draws a spurious straight line stitching the end of one subpath
+ * to the start of the next, cutting straight through the middle of the glyph. This splits a path
+ * element into one temporary sibling <path> per subpath (inserted right next to the original, so
+ * it inherits the exact same ancestor transforms/CTM), correctly resolving a leading relative
+ * "m" against the true end point of the previous subpath.
+ */
+function splitPathIntoSubpathElements(pathEl: Element): { el: SVGGeometryElement; closed: boolean }[] {
+  const d = (pathEl.getAttribute("d") || "").trim();
+  if (!d) return [];
+
+  const chunks = d.match(/[Mm][^Mm]*/g);
+  if (!chunks || chunks.length <= 1) {
+    return [{ el: pathEl as unknown as SVGGeometryElement, closed: /[Zz]\s*$/.test(d) }];
+  }
+
+  const parent = pathEl.parentNode;
+  if (!parent) return [{ el: pathEl as unknown as SVGGeometryElement, closed: /[Zz]\s*$/.test(d) }];
+
+  const results: { el: SVGGeometryElement; closed: boolean }[] = [];
+  let currentEnd: [number, number] | null = null;
+
+  for (const rawChunk of chunks) {
+    let chunk = rawChunk;
+    const isRelative = chunk[0] === "m";
+    const firstMove = FIRST_MOVE_RE.exec(chunk);
+
+    if (isRelative && firstMove && currentEnd) {
+      const dx = parseFloat(firstMove[1]);
+      const dy = parseFloat(firstMove[2]);
+      const ax = currentEnd[0] + dx;
+      const ay = currentEnd[1] + dy;
+      chunk = `M ${ax} ${ay}` + chunk.slice(firstMove[0].length);
+    }
+
+    const tempPath = document.createElementNS(SVG_NS, "path");
+    tempPath.setAttribute("d", chunk);
+    parent.insertBefore(tempPath, pathEl);
+
+    const closed = /[Zz]\s*$/.test(chunk.trim());
+    results.push({ el: tempPath as unknown as SVGGeometryElement, closed });
+
+    // Track this subpath's true end point (in the path's own local/untransformed space) so a
+    // relative "m" starting the *next* subpath resolves correctly.
+    try {
+      const total = tempPath.getTotalLength();
+      const end = tempPath.getPointAtLength(total);
+      currentEnd = [end.x, end.y];
+    } catch {
+      currentEnd = null;
+    }
+  }
+
+  return results;
+}
+
 /**
  * Parses raw SVG markup into flattened, mm-space polylines.
  * Uses the browser's native SVG geometry engine (getTotalLength / getPointAtLength / getCTM)
@@ -219,20 +281,26 @@ export async function parseSvgToPaths(svgText: string): Promise<ParsedSvgResult>
       if (anyAncestorHidden(el, imported)) continue;
       if (isVisuallyInvisible(el)) continue;
 
-      const geomEl = el as unknown as SVGGeometryElement;
-      if (typeof geomEl.getCTM !== "function" || typeof geomEl.getTotalLength !== "function") continue;
-      const ctm = geomEl.getCTM();
-      if (!ctm) continue;
+      // A single <path> may contain multiple subpaths (e.g. a letter's outer contour plus an
+      // inner hole for O/A/R/etc.) - split those into separate geometry entries up front so they
+      // never get stitched together into one continuous curve.
+      const subEntries = tag === "path" ? splitPathIntoSubpathElements(el) : [{ el: el as unknown as SVGGeometryElement, closed: isClosedShape(el) }];
 
-      let total = 0;
-      try {
-        total = geomEl.getTotalLength();
-      } catch {
-        continue;
+      for (const { el: geomEl, closed } of subEntries) {
+        if (typeof geomEl.getCTM !== "function" || typeof geomEl.getTotalLength !== "function") continue;
+        const ctm = geomEl.getCTM();
+        if (!ctm) continue;
+
+        let total = 0;
+        try {
+          total = geomEl.getTotalLength();
+        } catch {
+          continue;
+        }
+
+        candidates.push({ el: geomEl, ctm, total, closed });
+        totalLenAll += Math.max(total, 0);
       }
-
-      candidates.push({ el: geomEl, ctm, total, closed: isClosedShape(el) });
-      totalLenAll += Math.max(total, 0);
 
       if (i % YIELD_EVERY_N_ELEMENTS === 0) await yieldToMain();
     }

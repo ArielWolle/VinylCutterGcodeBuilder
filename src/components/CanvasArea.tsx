@@ -412,9 +412,28 @@ export function CanvasArea() {
             const rotateW = rotateHandleWorld(selectedItem);
             const rotateS = toScreen(rotateW.x, rotateW.y);
             const path = corners.map((c) => `${c.x},${c.y}`).join(" ");
+            const widthMm = selectedItem.naturalWidthMm * selectedItem.transform.scaleX;
+            const heightMm = selectedItem.naturalHeightMm * selectedItem.transform.scaleY;
+            // corners[0]/[1] = bottom edge, corners[0]/[3] = left edge (local Y increases upward).
+            const bottomMid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
+            const leftMid = { x: (corners[0].x + corners[3].x) / 2, y: (corners[0].y + corners[3].y) / 2 };
             return (
               <g>
                 <polygon points={path} fill="none" stroke="#ffb347" strokeWidth={1.5} strokeDasharray="4 3" />
+
+                <g>
+                  <rect x={bottomMid.x - 62} y={bottomMid.y + 10} width={124} height={18} rx={3} fill="#10141b" stroke="#ffb347" strokeWidth={1} />
+                  <text x={bottomMid.x} y={bottomMid.y + 23} textAnchor="middle" fill="#ffb347" fontSize={10.5}>
+                    {formatDim(widthMm)}
+                  </text>
+                </g>
+                <g>
+                  <rect x={leftMid.x - 116} y={leftMid.y - 9} width={110} height={18} rx={3} fill="#10141b" stroke="#ffb347" strokeWidth={1} />
+                  <text x={leftMid.x - 61} y={leftMid.y + 4} textAnchor="middle" fill="#ffb347" fontSize={10.5}>
+                    {formatDim(heightMm)}
+                  </text>
+                </g>
+
                 {!selectedItem.locked && (
                   <>
                     {/* corners[2]/[3] are the top edge (local y = naturalHeightMm, since local Y increases upward) */}
@@ -492,6 +511,12 @@ function pointInPolygon(p: Pt, poly: Pt[]): boolean {
 
 function dist(a: Pt, b: Pt): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/** Formats a millimeter dimension as "123.4mm (4.86in)" for on-canvas size labels. */
+function formatDim(mm: number): string {
+  const inches = mm / 25.4;
+  return `${mm.toFixed(1)}mm (${inches.toFixed(2)}in)`;
 }
 
 /** Smallest signed difference (in degrees, range -180..180) between two angles. */
