@@ -1,0 +1,216 @@
+import { create } from "zustand";
+import { SerialConnection, sendGcodeJob } from "../lib/serial";
+import type { JobStatus, LogEntry } from "../types";
+
+export const COMMON_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200, 230400, 250000];
+
+interface KnownPort {
+  port: SerialPort;
+  label: string;
+}
+
+interface SerialState {
+  connection: SerialConnection;
+  supported: boolean;
+  connected: boolean;
+  connecting: boolean;
+  baudRate: number;
+  selectedPort: SerialPort | null;
+  knownPorts: KnownPort[];
+  logs: LogEntry[];
+  ackWaiters: ((line: string) => boolean)[];
+
+  job: {
+    status: JobStatus;
+    currentLine: number;
+    totalLines: number;
+    lines: string[];
+    waitForAck: boolean;
+    ackTimeoutMs: number;
+    interLineDelayMs: number;
+  };
+  jobAbort: boolean;
+  jobPaused: boolean;
+
+  setBaudRate: (baud: number) => void;
+  refreshKnownPorts: () => Promise<void>;
+  requestPort: () => Promise<void>;
+  selectPort: (port: SerialPort) => void;
+  connect: () => Promise<void>;
+  disconnect: () => Promise<void>;
+  sendCommand: (text: string) => Promise<void>;
+  clearLogs: () => void;
+
+  startJob: (lines: string[], opts?: { waitForAck?: boolean; ackTimeoutMs?: number; interLineDelayMs?: number }) => Promise<void>;
+  pauseJob: () => void;
+  resumeJob: () => void;
+  stopJob: () => void;
+}
+
+let logIdCounter = 1;
+
+function portLabel(port: SerialPort, idx: number): string {
+  const info = port.getInfo?.() ?? {};
+  const vid = info.usbVendorId !== undefined ? info.usbVendorId.toString(16).padStart(4, "0") : "????";
+  const pid = info.usbProductId !== undefined ? info.usbProductId.toString(16).padStart(4, "0") : "????";
+  return `Port ${idx + 1} (VID:${vid} PID:${pid})`;
+}
+
+export const useSerialStore = create<SerialState>((set, get) => {
+  const connection = new SerialConnection();
+
+  connection.onStatus = (status, detail) => {
+    if (status === "connected") {
+      set({ connected: true, connecting: false });
+      pushLog("info", "Connected.");
+    } else if (status === "disconnected") {
+      set({ connected: false, connecting: false });
+      pushLog("info", "Disconnected.");
+    } else if (status === "error") {
+      set({ connected: false, connecting: false });
+      pushLog("error", `Serial error: ${detail ?? "unknown"}`);
+    }
+  };
+
+  connection.onLine = (line) => {
+    pushLog("rx", line);
+    const waiters = get().ackWaiters;
+    if (waiters.length > 0) {
+      const remaining = waiters.filter((w) => !w(line));
+      if (remaining.length !== waiters.length) set({ ackWaiters: remaining });
+    }
+  };
+
+  function pushLog(dir: LogEntry["dir"], text: string) {
+    set((s) => ({
+      logs: [...s.logs.slice(-999), { id: logIdCounter++, ts: Date.now(), dir, text }],
+    }));
+  }
+
+  return {
+    connection,
+    supported: SerialConnection.isSupported(),
+    connected: false,
+    connecting: false,
+    baudRate: 115200,
+    selectedPort: null,
+    knownPorts: [],
+    logs: [],
+    ackWaiters: [],
+    job: {
+      status: "idle",
+      currentLine: 0,
+      totalLines: 0,
+      lines: [],
+      waitForAck: true,
+      ackTimeoutMs: 4000,
+      interLineDelayMs: 30,
+    },
+    jobAbort: false,
+    jobPaused: false,
+
+    setBaudRate: (baud) => set({ baudRate: baud }),
+
+    refreshKnownPorts: async () => {
+      if (!SerialConnection.isSupported()) return;
+      const ports = await SerialConnection.getAuthorizedPorts();
+      set({ knownPorts: ports.map((port, idx) => ({ port, label: portLabel(port, idx) })) });
+    },
+
+    requestPort: async () => {
+      if (!SerialConnection.isSupported()) return;
+      try {
+        const port = await SerialConnection.requestPort();
+        await get().refreshKnownPorts();
+        set({ selectedPort: port });
+      } catch (err: any) {
+        if (err?.name !== "NotFoundError") {
+          pushLog("error", `Port request failed: ${err?.message ?? err}`);
+        }
+      }
+    },
+
+    selectPort: (port) => set({ selectedPort: port }),
+
+    connect: async () => {
+      const { selectedPort, baudRate } = get();
+      if (!selectedPort) {
+        pushLog("error", "No port selected.");
+        return;
+      }
+      set({ connecting: true });
+      try {
+        await connection.connect(selectedPort, baudRate);
+      } catch (err: any) {
+        set({ connecting: false });
+        pushLog("error", `Connect failed: ${err?.message ?? err}`);
+      }
+    },
+
+    disconnect: async () => {
+      await connection.disconnect();
+    },
+
+    sendCommand: async (text: string) => {
+      if (!connection.isOpen) {
+        pushLog("error", "Not connected.");
+        return;
+      }
+      pushLog("tx", text);
+      try {
+        await connection.writeLine(text);
+      } catch (err: any) {
+        pushLog("error", `Write failed: ${err?.message ?? err}`);
+      }
+    },
+
+    clearLogs: () => set({ logs: [] }),
+
+    startJob: async (lines, opts) => {
+      if (!connection.isOpen) {
+        pushLog("error", "Not connected.");
+        return;
+      }
+      const waitForAck = opts?.waitForAck ?? get().job.waitForAck;
+      const ackTimeoutMs = opts?.ackTimeoutMs ?? get().job.ackTimeoutMs;
+      const interLineDelayMs = opts?.interLineDelayMs ?? get().job.interLineDelayMs;
+
+      set({
+        jobAbort: false,
+        jobPaused: false,
+        job: { ...get().job, status: "running", currentLine: 0, totalLines: lines.length, lines, waitForAck, ackTimeoutMs, interLineDelayMs },
+      });
+      pushLog("info", `Job started: ${lines.length} lines.`);
+
+      const result = await sendGcodeJob(connection, lines, {
+        waitForAck,
+        ackPattern: /ok|error/i,
+        ackTimeoutMs,
+        interLineDelayMs,
+        onProgress: (index, total, line) => {
+          set((s) => ({ job: { ...s.job, currentLine: index, totalLines: total } }));
+          pushLog("tx", line);
+        },
+        isAborted: () => get().jobAbort,
+        isPaused: () => get().jobPaused,
+        registerAckWaiter: (waiter) => {
+          set((s) => ({ ackWaiters: [...s.ackWaiters, waiter] }));
+          return () => set((s) => ({ ackWaiters: s.ackWaiters.filter((w) => w !== waiter) }));
+        },
+      });
+
+      set((s) => ({ job: { ...s.job, status: result === "done" ? "done" : "stopped" } }));
+      pushLog("info", result === "done" ? "Job complete." : "Job stopped.");
+    },
+
+    pauseJob: () => {
+      set({ jobPaused: true, job: { ...get().job, status: "paused" } });
+    },
+    resumeJob: () => {
+      set({ jobPaused: false, job: { ...get().job, status: "running" } });
+    },
+    stopJob: () => {
+      set({ jobAbort: true, jobPaused: false });
+    },
+  };
+});
