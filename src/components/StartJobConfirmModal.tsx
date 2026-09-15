@@ -27,6 +27,13 @@ export function StartJobConfirmModal({ onConfirm, onCancel }: Props) {
     setChecking(false);
   };
 
+  /** Zeroes an axis at its current position (G92, non-destructive - doesn't move the head, just
+   *  redefines where "0" is), then refreshes the readout so it's obvious it took effect. */
+  const zeroAxis = async (axis: "X" | "Y") => {
+    await sendCommand(`G92 ${axis}0`);
+    await refresh();
+  };
+
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -70,6 +77,9 @@ export function StartJobConfirmModal({ onConfirm, onCancel }: Props) {
             <button className="btn small" onClick={() => sendCommand("$H")}>
               Home X ($H)
             </button>
+            <button className="btn small" onClick={() => zeroAxis("X")}>
+              Set X to 0 here
+            </button>
           </div>
         </div>
 
@@ -90,6 +100,11 @@ export function StartJobConfirmModal({ onConfirm, onCancel }: Props) {
             </button>
             <button className="btn small" onClick={() => jogAxis("Y", jogStep)}>
               Y+ {"\u2192"}
+            </button>
+          </div>
+          <div className="btn-row">
+            <button className="btn small" onClick={() => zeroAxis("Y")}>
+              Set Y to 0 here
             </button>
           </div>
         </div>
