@@ -103,7 +103,18 @@ export function createOffsetArcs(lines: GeoLine[], toolRadius: number): GeoLine[
     const dirA: Vec2 = [Math.cos(thetaA), Math.sin(thetaA)];
     const dirB: Vec2 = [Math.cos(thetaB), Math.sin(thetaB)];
 
-    const extendedEnd: Vec2 = [corner[0] + toolRadius * dirA[0], corner[1] + toolRadius * dirA[1]];
+    // Clamp the swivel radius to a fraction of the shorter adjacent segment so the extension
+    // never overshoots past that segment's own far endpoint. Without this, short strokes near a
+    // corner (common in text/font outlines) get corrupted into a self-intersecting wedge/loop
+    // instead of a clean rounded corner.
+    const maxRadius = Math.min(lineLength(l1), lineLength(l2)) * 0.45;
+    const radius = Math.min(toolRadius, maxRadius);
+    if (radius <= 1e-6) {
+      result.push(l1);
+      continue;
+    }
+
+    const extendedEnd: Vec2 = [corner[0] + radius * dirA[0], corner[1] + radius * dirA[1]];
     result.push({ x1: l1.x1, y1: l1.y1, x2: extendedEnd[0], y2: extendedEnd[1] });
 
     let delta = thetaB - thetaA;
