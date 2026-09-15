@@ -126,10 +126,80 @@ export const useDesignStore = create<DesignState>()(
         paths = await flattenSvgGeometry(rawSvg, item.naturalWidthMm, item.naturalHeightMm, item.viewBox);
       } catch (err) {
         console.error("Failed to flatten SVG geometry for cutting:", err);
-      } finally {
         set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) }));
         pendingFlattens.delete(id);
+        return;
       }
+
+      // The SVG's declared canvas (width/height/viewBox) often includes extra margin beyond the
+      // actual artwork - crop the item's bounding box down to the true content bbox now that we
+      // know it, so the box the user drags/resizes on the design canvas always matches exactly
+      // what gets cut, instead of the design view and G-code preview disagreeing on where the
+      // words sit. The native SVG's viewBox is re-cropped to the same region so both stay in
+      // sync, and the position is compensated so the artwork doesn't visually jump.
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const p of paths) {
+        for (const [x, y] of p.points) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+
+      set((s) => {
+        const current = s.items.find((i) => i.id === id);
+        if (!current || !Number.isFinite(minX)) {
+          return { items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) };
+        }
+
+        const oldW = current.naturalWidthMm;
+        const oldH = current.naturalHeightMm;
+        const vb = current.viewBox;
+        const mmPerUnitX = vb.w > 0 ? oldW / vb.w : 1;
+        const mmPerUnitY = vb.h > 0 ? oldH / vb.h : 1;
+
+        const naturalWidthMm = Math.max(maxX - minX, 0.01);
+        const naturalHeightMm = Math.max(maxY - minY, 0.01);
+
+        const viewBox = {
+          x: minX / mmPerUnitX + vb.x,
+          y: (oldH - maxY) / mmPerUnitY + vb.y,
+          w: naturalWidthMm / mmPerUnitX,
+          h: naturalHeightMm / mmPerUnitY,
+        };
+
+        const shiftedPaths: FlattenedPath[] = paths.map((p) => ({
+          closed: p.closed,
+          points: p.points.map(([x, y]) => [x - minX, y - minY] as [number, number]),
+        }));
+
+        // Position compensation assumes rotation 0 (the normal case immediately after import);
+        // world = x + lx*scaleX at rotation 0, so shifting the local origin by (minX,minY) needs
+        // the same shift applied to x/y, scaled, to keep the artwork's on-screen position fixed.
+        const { scaleX, scaleY } = current.transform;
+        const x = current.transform.x + minX * scaleX;
+        const y = current.transform.y + minY * scaleY;
+
+        return {
+          items: s.items.map((i) =>
+            i.id === id
+              ? {
+                  ...i,
+                  naturalWidthMm,
+                  naturalHeightMm,
+                  viewBox,
+                  paths: shiftedPaths,
+                  transform: { ...i.transform, x, y },
+                }
+              : i
+          ),
+        };
+      });
+      pendingFlattens.delete(id);
     })();
 
     pendingFlattens.set(id, promise);
