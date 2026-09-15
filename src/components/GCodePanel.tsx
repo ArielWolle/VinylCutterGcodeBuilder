@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDesignStore } from "../store/designStore";
 import { useMachineStore } from "../store/machineStore";
 import { useSerialStore } from "../store/serialStore";
 import { useGcodeStore } from "../store/gcodeStore";
 import { useUiStore } from "../store/uiStore";
 import { estimateJobTimeSeconds, generateGcode } from "../lib/gcode";
+import { StartJobConfirmModal } from "./StartJobConfirmModal";
+
+const GCODE_LINE_HEIGHT = 16;
 
 export function GCodePanel() {
   const frame = useDesignStore((s) => s.frame);
@@ -13,6 +16,8 @@ export function GCodePanel() {
   const settings = useMachineStore((s) => s.settings);
   const connected = useSerialStore((s) => s.connected);
   const needsUnlock = useSerialStore((s) => s.needsUnlock);
+  const reconnecting = useSerialStore((s) => s.reconnecting);
+  const reconnectAttempt = useSerialStore((s) => s.reconnectAttempt);
   const sendCommand = useSerialStore((s) => s.sendCommand);
   const jobStatus = useSerialStore((s) => s.job.status);
   const jobCurrentLine = useSerialStore((s) => s.job.currentLine);
@@ -27,8 +32,22 @@ export function GCodePanel() {
   const setMainView = useUiStore((s) => s.setMainView);
   const [waitForAck, setWaitForAck] = useState(true);
   const [preparing, setPreparing] = useState(false);
+  const [showStartConfirm, setShowStartConfirm] = useState(false);
+  const gcodeScrollRef = useRef<HTMLDivElement>(null);
 
   const canGenerate = items.some((i) => i.visible);
+  const jobRunning = jobStatus === "running" || jobStatus === "paused" || jobStatus === "lost";
+
+  // Auto-scroll the G-code preview to keep the currently-sending line in view, so if something
+  // goes wrong (e.g. a lost connection) you can see exactly where it stopped and resume there.
+  useEffect(() => {
+    if (!jobRunning) return;
+    const container = gcodeScrollRef.current;
+    if (!container) return;
+    const lineTop = jobCurrentLine * GCODE_LINE_HEIGHT;
+    const target = lineTop - container.clientHeight / 2 + GCODE_LINE_HEIGHT / 2;
+    container.scrollTo({ top: Math.max(target, 0), behavior: "smooth" });
+  }, [jobCurrentLine, jobRunning]);
 
   const regenerate = async () => {
     setPreparing(true);
@@ -63,8 +82,6 @@ export function GCodePanel() {
     await startJob(result.lines, { waitForAck });
   };
 
-  const jobRunning = jobStatus === "running" || jobStatus === "paused";
-
   return (
     <div className="panel">
       <h3>G-code</h3>
@@ -81,7 +98,12 @@ export function GCodePanel() {
             <span>{result.estimatedLengthMm.toFixed(0)} mm cut</span>
             <span>~{Math.ceil(estimateJobTimeSeconds(result, settings) / 60)} min</span>
           </div>
-          <textarea className="gcode-preview" readOnly rows={12} value={result.text} />
+          <div className="gcode-preview-wrap" ref={gcodeScrollRef}>
+            {jobRunning && (
+              <div className="gcode-current-line-highlight" style={{ top: 8 + jobCurrentLine * GCODE_LINE_HEIGHT }} />
+            )}
+            <pre className="gcode-preview-text">{result.text}</pre>
+          </div>
           <div className="btn-row">
             <button className="btn" onClick={download}>
               Download .gcode
@@ -107,7 +129,7 @@ export function GCodePanel() {
                 </div>
               </div>
             ) : (
-              <button className="btn primary" onClick={sendToMachine} disabled={!connected}>
+              <button className="btn primary" onClick={() => setShowStartConfirm(true)} disabled={!connected}>
                 {connected ? "Send G-code over serial" : "Connect a serial device first"}
               </button>
             )
@@ -120,13 +142,20 @@ export function GCodePanel() {
                 Line {jobCurrentLine + 1} / {jobTotalLines} &mdash; {jobStatus}
                 {jobStatus === "running" && " \u00B7 keeping this tab awake while sending"}
               </span>
+              {jobStatus === "lost" && (
+                <p className="muted small" style={{ color: "var(--danger)" }}>
+                  {reconnecting
+                    ? `Connection lost - reconnecting (attempt ${reconnectAttempt}/6)\u2026`
+                    : "Connection lost. Reconnect the device in Serial Settings, then click Resume to continue from this line."}
+                </p>
+              )}
               <div className="btn-row">
                 {jobStatus === "running" ? (
                   <button className="btn" onClick={pauseJob}>
                     Pause
                   </button>
                 ) : (
-                  <button className="btn" onClick={resumeJob}>
+                  <button className="btn" onClick={resumeJob} disabled={jobStatus === "lost" && (!connected || reconnecting)}>
                     Resume
                   </button>
                 )}
@@ -137,6 +166,16 @@ export function GCodePanel() {
             </div>
           )}
         </>
+      )}
+
+      {showStartConfirm && (
+        <StartJobConfirmModal
+          onCancel={() => setShowStartConfirm(false)}
+          onConfirm={() => {
+            setShowStartConfirm(false);
+            void sendToMachine();
+          }}
+        />
       )}
     </div>
   );

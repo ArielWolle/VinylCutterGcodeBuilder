@@ -45,6 +45,10 @@ export interface SvgItem {
   /** Serialized inner markup of the root <svg> (ids namespaced to this item to avoid collisions
    *  between multiple imports), embedded directly for instant, exact-fidelity rendering. */
   innerSvgHTML: string;
+  /** Original raw SVG file text, kept so cut/draw geometry can be (re-)flattened in the
+   *  background - including after reloading a persisted session, where `paths` always starts
+   *  out null again rather than persisting potentially-huge point arrays to localStorage. */
+  rawSvgText: string;
 
   /**
    * Flattened cut/draw geometry, computed in the background after import so dropping an SVG onto
@@ -108,4 +112,6 @@ export interface LogEntry {
   text: string;
 }
 
-export type JobStatus = "idle" | "running" | "paused" | "done" | "error" | "stopped";
+/** "lost" = the connection dropped mid-job (e.g. a flaky USB-serial adapter on macOS); the job
+ *  is preserved (lines + current position) so it can be resumed once reconnected. */
+export type JobStatus = "idle" | "running" | "paused" | "done" | "error" | "stopped" | "lost";

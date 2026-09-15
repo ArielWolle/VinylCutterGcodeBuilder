@@ -5,6 +5,10 @@ import type { JobStatus, LogEntry } from "../types";
 
 export const COMMON_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200, 230400, 250000];
 
+const RECONNECT_MAX_ATTEMPTS = 6;
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 10000;
+
 interface KnownPort {
   port: SerialPort;
   label: string;
@@ -22,6 +26,9 @@ interface SerialState {
   ackWaiters: ((line: string) => boolean)[];
   /** True once we've seen a GRBL alarm/unlock-required message on this connection. */
   needsUnlock: boolean;
+  /** True while automatically retrying a dropped connection (see attemptReconnect). */
+  reconnecting: boolean;
+  reconnectAttempt: number;
 
   job: {
     status: JobStatus;
@@ -48,9 +55,19 @@ interface SerialState {
   disconnect: () => Promise<void>;
   sendCommand: (text: string) => Promise<void>;
   clearLogs: () => void;
+  /** Sends a GRBL-style "?" real-time status query and waits (briefly) for a matching
+   *  "<...|MPos:x,y,z|...>" or WPos response. Returns null on timeout/no response. */
+  queryPosition: () => Promise<{ x: number; y: number; z: number } | null>;
+  /** Jogs one axis by a relative distance (mm) using a G91/G0/G90 sequence. */
+  jogAxis: (axis: "X" | "Y", distanceMm: number) => Promise<void>;
 
-  startJob: (lines: string[], opts?: { waitForAck?: boolean; ackTimeoutMs?: number; interLineDelayMs?: number }) => Promise<void>;
+  startJob: (
+    lines: string[],
+    opts?: { waitForAck?: boolean; ackTimeoutMs?: number; interLineDelayMs?: number; startIndex?: number }
+  ) => Promise<void>;
   pauseJob: () => void;
+  /** Resumes a job paused mid-send, or restarts sending from where a "lost" job left off after
+   *  the connection has been reconnected. */
   resumeJob: () => void;
   stopJob: () => void;
 }
@@ -74,6 +91,10 @@ function updatePositionFromLine(line: string, prev: { x: number; y: number } | n
   return { x, y };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 let logIdCounter = 1;
 
 function portLabel(port: SerialPort, idx: number): string {
@@ -85,6 +106,37 @@ function portLabel(port: SerialPort, idx: number): string {
 
 export const useSerialStore = create<SerialState>((set, get) => {
   const connection = new SerialConnection();
+  let reconnectToken = 0;
+
+  async function attemptReconnect() {
+    const myToken = ++reconnectToken;
+    set({ reconnecting: true, reconnectAttempt: 0 });
+    for (let attempt = 1; attempt <= RECONNECT_MAX_ATTEMPTS; attempt++) {
+      if (reconnectToken !== myToken) return; // superseded by a newer attempt or manual action
+      set({ reconnectAttempt: attempt });
+      const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
+      pushLog("info", `Reconnecting (attempt ${attempt}/${RECONNECT_MAX_ATTEMPTS}) in ${Math.round(delay / 1000)}s\u2026`);
+      await sleep(delay);
+      if (reconnectToken !== myToken) return;
+      try {
+        await connection.reconnect();
+        set({ reconnecting: false, reconnectAttempt: 0 });
+        pushLog(
+          "info",
+          get().job.status === "lost"
+            ? "Reconnected. Click Resume to continue the job from where it left off."
+            : "Reconnected."
+        );
+        return;
+      } catch (err: any) {
+        pushLog("error", `Reconnect attempt ${attempt} failed: ${err?.message ?? err}`);
+      }
+    }
+    if (reconnectToken === myToken) {
+      set({ reconnecting: false });
+      pushLog("error", "Could not reconnect automatically. Check the cable/port and connect manually.");
+    }
+  }
 
   connection.onStatus = (status, detail) => {
     if (status === "connected") {
@@ -93,6 +145,17 @@ export const useSerialStore = create<SerialState>((set, get) => {
     } else if (status === "disconnected") {
       set({ connected: false, connecting: false, needsUnlock: false });
       pushLog("info", "Disconnected.");
+    } else if (status === "lost") {
+      set({ connected: false, connecting: false });
+      pushLog("error", `Device connection lost${detail ? `: ${detail}` : ""}. This is a known flaky-USB-serial-adapter issue, especially on macOS.`);
+      // Preserve the job (lines + current position) so it can be resumed after reconnecting,
+      // instead of losing progress.
+      const jobStatus = get().job.status;
+      if (jobStatus === "running" || jobStatus === "paused") {
+        set((s) => ({ job: { ...s.job, status: "lost" } }));
+        void setKeepAwake(false);
+      }
+      void attemptReconnect();
     } else if (status === "error") {
       set({ connected: false, connecting: false });
       pushLog("error", `Serial error: ${detail ?? "unknown"}`);
@@ -130,6 +193,8 @@ export const useSerialStore = create<SerialState>((set, get) => {
     logs: [],
     ackWaiters: [],
     needsUnlock: false,
+    reconnecting: false,
+    reconnectAttempt: 0,
     job: {
       status: "idle",
       currentLine: 0,
@@ -173,7 +238,8 @@ export const useSerialStore = create<SerialState>((set, get) => {
         pushLog("error", "No port selected.");
         return;
       }
-      set({ connecting: true });
+      reconnectToken++; // cancel any in-flight auto-reconnect - the user is taking manual control
+      set({ connecting: true, reconnecting: false });
       try {
         await connection.connect(selectedPort, baudRate);
       } catch (err: any) {
@@ -183,6 +249,8 @@ export const useSerialStore = create<SerialState>((set, get) => {
     },
 
     disconnect: async () => {
+      reconnectToken++; // cancel any in-flight auto-reconnect
+      set({ reconnecting: false });
       await connection.disconnect();
     },
 
@@ -201,6 +269,42 @@ export const useSerialStore = create<SerialState>((set, get) => {
 
     clearLogs: () => set({ logs: [] }),
 
+    queryPosition: async () => {
+      if (!connection.isOpen) return null;
+      const re = /(?:MPos|WPos):(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)/;
+      return new Promise((resolve) => {
+        let resolved = false;
+        const waiter = (line: string): boolean => {
+          const m = re.exec(line);
+          if (!m) return false;
+          if (!resolved) {
+            resolved = true;
+            resolve({ x: parseFloat(m[1]), y: parseFloat(m[2]), z: parseFloat(m[3]) });
+          }
+          return true;
+        };
+        set((s) => ({ ackWaiters: [...s.ackWaiters, waiter] }));
+        connection.writeRaw("?").catch(() => {
+          /* surfaced via the timeout below if it never responds */
+        });
+        window.setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            set((s) => ({ ackWaiters: s.ackWaiters.filter((w) => w !== waiter) }));
+            resolve(null);
+          }
+        }, 2000);
+      });
+    },
+
+    jogAxis: async (axis, distanceMm) => {
+      if (!connection.isOpen) return;
+      const send = get().sendCommand;
+      await send("G91");
+      await send(`G0 ${axis}${distanceMm}`);
+      await send("G90");
+    },
+
     startJob: async (lines, opts) => {
       if (!connection.isOpen) {
         pushLog("error", "Not connected.");
@@ -213,6 +317,7 @@ export const useSerialStore = create<SerialState>((set, get) => {
       const waitForAck = opts?.waitForAck ?? get().job.waitForAck;
       const ackTimeoutMs = opts?.ackTimeoutMs ?? get().job.ackTimeoutMs;
       const interLineDelayMs = opts?.interLineDelayMs ?? get().job.interLineDelayMs;
+      const startIndex = opts?.startIndex ?? 0;
 
       set({
         jobAbort: false,
@@ -220,40 +325,55 @@ export const useSerialStore = create<SerialState>((set, get) => {
         job: {
           ...get().job,
           status: "running",
-          currentLine: 0,
+          currentLine: startIndex,
           totalLines: lines.length,
           lines,
           waitForAck,
           ackTimeoutMs,
           interLineDelayMs,
           startedAt: Date.now(),
-          currentPos: null,
+          currentPos: startIndex > 0 ? get().job.currentPos : null,
         },
       });
-      pushLog("info", `Job started: ${lines.length} lines.`);
+      pushLog("info", startIndex > 0 ? `Resuming job from line ${startIndex + 1}.` : `Job started: ${lines.length} lines.`);
       // Keep the screen (and machine) awake while commands are actively streaming out, the same
       // way a video player does during playback - a long cut job shouldn't get interrupted by
       // the OS putting the display/computer to sleep.
       void setKeepAwake(true);
 
-      const result = await sendGcodeJob(connection, lines, {
-        waitForAck,
-        ackPattern: /ok|error/i,
-        ackTimeoutMs,
-        interLineDelayMs,
-        onProgress: (index, total, line) => {
-          set((s) => ({
-            job: { ...s.job, currentLine: index, totalLines: total, currentPos: updatePositionFromLine(line, s.job.currentPos) },
-          }));
-          pushLog("tx", line);
-        },
-        isAborted: () => get().jobAbort,
-        isPaused: () => get().jobPaused,
-        registerAckWaiter: (waiter) => {
-          set((s) => ({ ackWaiters: [...s.ackWaiters, waiter] }));
-          return () => set((s) => ({ ackWaiters: s.ackWaiters.filter((w) => w !== waiter) }));
-        },
-      });
+      let result: "done" | "stopped" | "lost";
+      try {
+        result = await sendGcodeJob(connection, lines, {
+          waitForAck,
+          ackPattern: /ok|error/i,
+          ackTimeoutMs,
+          interLineDelayMs,
+          startIndex,
+          onProgress: (index, total, line) => {
+            set((s) => ({
+              job: { ...s.job, currentLine: index, totalLines: total, currentPos: updatePositionFromLine(line, s.job.currentPos) },
+            }));
+            pushLog("tx", line);
+          },
+          isAborted: () => get().jobAbort,
+          isPaused: () => get().jobPaused,
+          registerAckWaiter: (waiter) => {
+            set((s) => ({ ackWaiters: [...s.ackWaiters, waiter] }));
+            return () => set((s) => ({ ackWaiters: s.ackWaiters.filter((w) => w !== waiter) }));
+          },
+        });
+      } catch (err: any) {
+        // Should be unreachable (sendGcodeJob catches device-lost errors internally), but never
+        // let a job failure become an unhandled rejection that silently breaks the app.
+        pushLog("error", `Job failed unexpectedly: ${err?.message ?? err}`);
+        result = "stopped";
+      }
+
+      if (result === "lost") {
+        // connection.onStatus("lost") already flips job.status to "lost" and kicks off
+        // auto-reconnect; nothing further to do here.
+        return;
+      }
 
       set((s) => ({ job: { ...s.job, status: result === "done" ? "done" : "stopped" } }));
       pushLog("info", result === "done" ? "Job complete." : "Job stopped.");
@@ -265,6 +385,18 @@ export const useSerialStore = create<SerialState>((set, get) => {
       void setKeepAwake(false);
     },
     resumeJob: () => {
+      const job = get().job;
+      if (job.status === "lost") {
+        // The original send loop already exited when the connection dropped - restart it from
+        // where it left off rather than just flipping a "paused" flag on a dead loop.
+        void get().startJob(job.lines, {
+          waitForAck: job.waitForAck,
+          ackTimeoutMs: job.ackTimeoutMs,
+          interLineDelayMs: job.interLineDelayMs,
+          startIndex: job.currentLine,
+        });
+        return;
+      }
       set({ jobPaused: false, job: { ...get().job, status: "running" } });
       void setKeepAwake(true);
     },

@@ -4,11 +4,9 @@ import type { EditorTool, FlattenedPath, FrameSettings, SvgItem } from "../types
 import { flattenSvgGeometry, parseSvgMetadata } from "../lib/svgFlatten";
 import { defaultTransform } from "../lib/geometryTransform";
 
-// Raw SVG text per item id, kept outside the reactive store (it's only needed to (re)run the
-// background geometry flatten, never for rendering) plus in-flight flatten promises so multiple
-// callers (e.g. clicking "Generate G-code" while a background flatten is still running) can all
-// await the same work instead of triggering it twice.
-const rawSvgById = new Map<string, string>();
+// In-flight flatten promises, kept outside the reactive store (purely a de-dupe cache, never
+// rendered) so multiple callers (e.g. clicking "Generate G-code" while a background flatten is
+// still running) can all await the same work instead of triggering it twice.
 const pendingFlattens = new Map<string, Promise<void>>();
 
 interface MeasurePoints {
@@ -62,195 +60,209 @@ function centerTransformFor(item: Pick<SvgItem, "naturalWidthMm" | "naturalHeigh
 export const useDesignStore = create<DesignState>()(
   persist(
     (set, get) => ({
-  frame: { widthMm: 640, heightMm: 300 },
-  items: [],
-  selectedId: null,
-  tool: "select",
-  view: { pixelsPerMm: 2.2, panX: 40, panY: 40 },
-  measure: { a: null, b: null },
-  importing: false,
+      frame: { widthMm: 640, heightMm: 300 },
+      items: [],
+      selectedId: null,
+      tool: "select",
+      view: { pixelsPerMm: 2.2, panX: 40, panY: 40 },
+      measure: { a: null, b: null },
+      importing: false,
 
-  setFrame: (frame) => set((s) => ({ frame: { ...s.frame, ...frame } })),
-  setTool: (tool) => set({ tool, measure: { a: null, b: null } }),
-  setView: (view) => set((s) => ({ view: { ...s.view, ...view } })),
+      setFrame: (frame) => set((s) => ({ frame: { ...s.frame, ...frame } })),
+      setTool: (tool) => set({ tool, measure: { a: null, b: null } }),
+      setView: (view) => set((s) => ({ view: { ...s.view, ...view } })),
 
-  importSvgFile: async (file: File) => {
-    set({ importing: true });
-    try {
-      const id = crypto.randomUUID();
-      const text = await file.text();
-      // Fast, synchronous metadata-only parse (size/viewBox/markup) - no geometry sampling, so
-      // this is effectively instant even for very complex files. The item is draggable/resizable
-      // immediately, rendered as the real native SVG; actual cut/draw geometry is flattened
-      // separately in the background (kicked off below) without blocking the import at all.
-      const meta = parseSvgMetadata(text, id);
-      rawSvgById.set(id, text);
+      importSvgFile: async (file: File) => {
+        set({ importing: true });
+        try {
+          const id = crypto.randomUUID();
+          const text = await file.text();
+          // Fast, synchronous metadata-only parse (size/viewBox/markup) - no geometry sampling, so
+          // this is effectively instant even for very complex files. The item is draggable/resizable
+          // immediately, rendered as the real native SVG; actual cut/draw geometry is flattened
+          // separately in the background (kicked off below) without blocking the import at all.
+          const meta = parseSvgMetadata(text, id);
 
-      const item: SvgItem = {
-        id,
-        name: file.name.replace(/\.svg$/i, ""),
-        naturalWidthMm: meta.naturalWidthMm,
-        naturalHeightMm: meta.naturalHeightMm,
-        transform: centerTransformFor(meta, get().frame),
-        viewBox: meta.viewBox,
-        innerSvgHTML: meta.innerSvgHTML,
-        paths: null,
-        visible: true,
-        locked: false,
-      };
-      set((s) => ({ items: [...s.items, item], selectedId: id }));
+          const item: SvgItem = {
+            id,
+            name: file.name.replace(/\.svg$/i, ""),
+            naturalWidthMm: meta.naturalWidthMm,
+            naturalHeightMm: meta.naturalHeightMm,
+            transform: centerTransformFor(meta, get().frame),
+            viewBox: meta.viewBox,
+            innerSvgHTML: meta.innerSvgHTML,
+            rawSvgText: text,
+            paths: null,
+            visible: true,
+            locked: false,
+          };
+          set((s) => ({ items: [...s.items, item], selectedId: id }));
 
-      // Fire-and-forget: start the background flatten now so it's typically already done by the
-      // time the user gets around to generating G-code, without making them wait for it here.
-      void get().ensureItemGeometry(id);
+          // Fire-and-forget: start the background flatten now so it's typically already done by the
+          // time the user gets around to generating G-code, without making them wait for it here.
+          void get().ensureItemGeometry(id);
 
-      return id;
-    } finally {
-      set({ importing: false });
-    }
-  },
+          return id;
+        } finally {
+          set({ importing: false });
+        }
+      },
 
-  ensureItemGeometry: async (id: string) => {
-    const existing = pendingFlattens.get(id);
-    if (existing) return existing;
+      ensureItemGeometry: async (id: string) => {
+        const existing = pendingFlattens.get(id);
+        if (existing) return existing;
 
-    const item = get().items.find((i) => i.id === id);
-    if (!item || item.paths) return;
+        const item = get().items.find((i) => i.id === id);
+        if (!item || item.paths || !item.rawSvgText) return;
 
-    const rawSvg = rawSvgById.get(id);
-    if (!rawSvg) return;
+        const promise = (async () => {
+          let paths: FlattenedPath[] = [];
+          try {
+            paths = await flattenSvgGeometry(item.rawSvgText, item.naturalWidthMm, item.naturalHeightMm);
+          } catch (err) {
+            console.error("Failed to flatten SVG geometry for cutting:", err);
+            set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) }));
+            pendingFlattens.delete(id);
+            return;
+          }
 
-    const promise = (async () => {
-      let paths: FlattenedPath[] = [];
-      try {
-        paths = await flattenSvgGeometry(rawSvg, item.naturalWidthMm, item.naturalHeightMm);
-      } catch (err) {
-        console.error("Failed to flatten SVG geometry for cutting:", err);
-        set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) }));
+          // The SVG's declared canvas (width/height/viewBox) often includes extra margin beyond the
+          // actual artwork - crop the item's bounding box down to the true content bbox now that we
+          // know it, so the box the user drags/resizes on the design canvas always matches exactly
+          // what gets cut, instead of the design view and G-code preview disagreeing on where the
+          // words sit. The native SVG's viewBox is re-cropped to the same region so both stay in
+          // sync, and the position is compensated so the artwork doesn't visually jump.
+          let minX = Infinity;
+          let minY = Infinity;
+          let maxX = -Infinity;
+          let maxY = -Infinity;
+          for (const p of paths) {
+            for (const [x, y] of p.points) {
+              if (x < minX) minX = x;
+              if (y < minY) minY = y;
+              if (x > maxX) maxX = x;
+              if (y > maxY) maxY = y;
+            }
+          }
+
+          set((s) => {
+            const current = s.items.find((i) => i.id === id);
+            if (!current || !Number.isFinite(minX)) {
+              return { items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) };
+            }
+
+            const oldW = current.naturalWidthMm;
+            const oldH = current.naturalHeightMm;
+            const vb = current.viewBox;
+            const mmPerUnitX = vb.w > 0 ? oldW / vb.w : 1;
+            const mmPerUnitY = vb.h > 0 ? oldH / vb.h : 1;
+
+            const naturalWidthMm = Math.max(maxX - minX, 0.01);
+            const naturalHeightMm = Math.max(maxY - minY, 0.01);
+
+            const viewBox = {
+              x: minX / mmPerUnitX + vb.x,
+              y: (oldH - maxY) / mmPerUnitY + vb.y,
+              w: naturalWidthMm / mmPerUnitX,
+              h: naturalHeightMm / mmPerUnitY,
+            };
+
+            const shiftedPaths: FlattenedPath[] = paths.map((p) => ({
+              closed: p.closed,
+              points: p.points.map(([x, y]) => [x - minX, y - minY] as [number, number]),
+            }));
+
+            // Position compensation assumes rotation 0 (the normal case immediately after import);
+            // world = x + lx*scaleX at rotation 0, so shifting the local origin by (minX,minY) needs
+            // the same shift applied to x/y, scaled, to keep the artwork's on-screen position fixed.
+            const { scaleX, scaleY } = current.transform;
+            const x = current.transform.x + minX * scaleX;
+            const y = current.transform.y + minY * scaleY;
+
+            return {
+              items: s.items.map((i) =>
+                i.id === id
+                  ? {
+                      ...i,
+                      naturalWidthMm,
+                      naturalHeightMm,
+                      viewBox,
+                      paths: shiftedPaths,
+                      transform: { ...i.transform, x, y },
+                    }
+                  : i
+              ),
+            };
+          });
+          pendingFlattens.delete(id);
+        })();
+
+        pendingFlattens.set(id, promise);
+        return promise;
+      },
+
+      removeItem: (id) => {
         pendingFlattens.delete(id);
-        return;
-      }
-
-      // The SVG's declared canvas (width/height/viewBox) often includes extra margin beyond the
-      // actual artwork - crop the item's bounding box down to the true content bbox now that we
-      // know it, so the box the user drags/resizes on the design canvas always matches exactly
-      // what gets cut, instead of the design view and G-code preview disagreeing on where the
-      // words sit. The native SVG's viewBox is re-cropped to the same region so both stay in
-      // sync, and the position is compensated so the artwork doesn't visually jump.
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const p of paths) {
-        for (const [x, y] of p.points) {
-          if (x < minX) minX = x;
-          if (y < minY) minY = y;
-          if (x > maxX) maxX = x;
-          if (y > maxY) maxY = y;
-        }
-      }
-
-      set((s) => {
-        const current = s.items.find((i) => i.id === id);
-        if (!current || !Number.isFinite(minX)) {
-          return { items: s.items.map((i) => (i.id === id ? { ...i, paths } : i)) };
-        }
-
-        const oldW = current.naturalWidthMm;
-        const oldH = current.naturalHeightMm;
-        const vb = current.viewBox;
-        const mmPerUnitX = vb.w > 0 ? oldW / vb.w : 1;
-        const mmPerUnitY = vb.h > 0 ? oldH / vb.h : 1;
-
-        const naturalWidthMm = Math.max(maxX - minX, 0.01);
-        const naturalHeightMm = Math.max(maxY - minY, 0.01);
-
-        const viewBox = {
-          x: minX / mmPerUnitX + vb.x,
-          y: (oldH - maxY) / mmPerUnitY + vb.y,
-          w: naturalWidthMm / mmPerUnitX,
-          h: naturalHeightMm / mmPerUnitY,
-        };
-
-        const shiftedPaths: FlattenedPath[] = paths.map((p) => ({
-          closed: p.closed,
-          points: p.points.map(([x, y]) => [x - minX, y - minY] as [number, number]),
+        set((s) => ({
+          items: s.items.filter((i) => i.id !== id),
+          selectedId: s.selectedId === id ? null : s.selectedId,
         }));
+      },
 
-        // Position compensation assumes rotation 0 (the normal case immediately after import);
-        // world = x + lx*scaleX at rotation 0, so shifting the local origin by (minX,minY) needs
-        // the same shift applied to x/y, scaled, to keep the artwork's on-screen position fixed.
-        const { scaleX, scaleY } = current.transform;
-        const x = current.transform.x + minX * scaleX;
-        const y = current.transform.y + minY * scaleY;
+      selectItem: (id) => set({ selectedId: id }),
 
-        return {
-          items: s.items.map((i) =>
-            i.id === id
-              ? {
-                  ...i,
-                  naturalWidthMm,
-                  naturalHeightMm,
-                  viewBox,
-                  paths: shiftedPaths,
-                  transform: { ...i.transform, x, y },
-                }
-              : i
-          ),
-        };
-      });
-      pendingFlattens.delete(id);
-    })();
+      updateTransform: (id, transform) =>
+        set((s) => ({
+          items: s.items.map((i) => (i.id === id ? { ...i, transform: { ...i.transform, ...transform } } : i)),
+        })),
 
-    pendingFlattens.set(id, promise);
-    return promise;
-  },
+      setItemVisible: (id, visible) =>
+        set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, visible } : i)) })),
 
-  removeItem: (id) => {
-    rawSvgById.delete(id);
-    pendingFlattens.delete(id);
-    set((s) => ({
-      items: s.items.filter((i) => i.id !== id),
-      selectedId: s.selectedId === id ? null : s.selectedId,
-    }));
-  },
+      setItemLocked: (id, locked) =>
+        set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, locked } : i)) })),
 
-  selectItem: (id) => set({ selectedId: id }),
+      reorderItem: (id, direction) =>
+        set((s) => {
+          const idx = s.items.findIndex((i) => i.id === id);
+          if (idx < 0) return s;
+          const swapWith = direction === "up" ? idx - 1 : idx + 1;
+          if (swapWith < 0 || swapWith >= s.items.length) return s;
+          const items = [...s.items];
+          [items[idx], items[swapWith]] = [items[swapWith], items[idx]];
+          return { items };
+        }),
 
-  updateTransform: (id, transform) =>
-    set((s) => ({
-      items: s.items.map((i) => (i.id === id ? { ...i, transform: { ...i.transform, ...transform } } : i)),
-    })),
+      renameItem: (id, name) =>
+        set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, name } : i)) })),
 
-  setItemVisible: (id, visible) =>
-    set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, visible } : i)) })),
-
-  setItemLocked: (id, locked) =>
-    set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, locked } : i)) })),
-
-  reorderItem: (id, direction) =>
-    set((s) => {
-      const idx = s.items.findIndex((i) => i.id === id);
-      if (idx < 0) return s;
-      const swapWith = direction === "up" ? idx - 1 : idx + 1;
-      if (swapWith < 0 || swapWith >= s.items.length) return s;
-      const items = [...s.items];
-      [items[idx], items[swapWith]] = [items[swapWith], items[idx]];
-      return { items };
-    }),
-
-  renameItem: (id, name) =>
-    set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, name } : i)) })),
-
-  setMeasurePoint: (which, point) =>
-    set((s) => ({ measure: { ...s.measure, [which]: point } })),
-  clearMeasure: () => set({ measure: { a: null, b: null } }),
+      setMeasurePoint: (which, point) => set((s) => ({ measure: { ...s.measure, [which]: point } })),
+      clearMeasure: () => set({ measure: { a: null, b: null } }),
     }),
     {
       name: "vcgb-design-state",
-      // Only the cutting frame size survives reloads - the design canvas itself (items,
-      // selection, etc.) is treated as ephemeral per-session state.
-      partialize: (state) => ({ frame: state.frame }),
+      // Persist the whole design session (cutting frame, imported items + their placement,
+      // selection, pan/zoom) so reloading the page picks up right where you left off. Flattened
+      // cut geometry (`paths`) is deliberately dropped before saving - it can be a large amount
+      // of point data for complex art, and it's cheap/safe to recompute in the background right
+      // after rehydration (see onFinishHydration below) instead of bloating localStorage with it.
+      partialize: (state) => ({
+        frame: state.frame,
+        items: state.items.map((i) => ({ ...i, paths: null })),
+        selectedId: state.selectedId,
+        view: state.view,
+      }),
     }
   )
 );
+
+// Once a persisted session is restored, kick off background geometry flattening for every
+// restored item (mirroring what happens right after a fresh import) so G-code generation and
+// accurate on-canvas bounding boxes are ready shortly after reload without blocking it.
+useDesignStore.persist.onFinishHydration((state) => {
+  for (const item of state.items) {
+    if (!item.paths && item.rawSvgText) {
+      void useDesignStore.getState().ensureItemGeometry(item.id);
+    }
+  }
+});
